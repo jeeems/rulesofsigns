@@ -1,0 +1,2 @@
+D:/jem/COMMISSIONS/rules-of-signs/rulesofsigns/android/app/.cxx/RelWithDebInfo/684si6xf/armeabi-v7a/CMakeFiles/edit_cache.dir
+D:/jem/COMMISSIONS/rules-of-signs/rulesofsigns/android/app/.cxx/RelWithDebInfo/684si6xf/armeabi-v7a/CMakeFiles/rebuild_cache.dir
