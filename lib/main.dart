@@ -65,6 +65,33 @@ class MyApp extends StatelessWidget {
   }
 }
 
+class ParsedTerm {
+  final double value;
+  final String operator;
+  final int originalIndex;
+  final String sign;
+
+  ParsedTerm(this.value, this.operator, this.originalIndex, this.sign);
+}
+
+class DecimalInputFormatter extends TextInputFormatter {
+  @override
+  TextEditingValue formatEditUpdate(
+      TextEditingValue oldValue, TextEditingValue newValue) {
+    // Allow only one decimal point
+    if (newValue.text.contains('.') &&
+        newValue.text.indexOf('.') != newValue.text.lastIndexOf('.')) {
+      return oldValue;
+    }
+    // Allow only digits and one decimal point
+    final regExp = RegExp(r'^[0-9]*\.?[0-9]*$');
+    if (!regExp.hasMatch(newValue.text)) {
+      return oldValue;
+    }
+    return newValue;
+  }
+}
+
 class MyHomePage extends StatefulWidget {
   const MyHomePage({super.key});
 
@@ -115,11 +142,86 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
     }
   }
 
+  List<ParsedTerm> _parseTerms() {
+    List<ParsedTerm> parsedTerms = [];
+
+    for (int i = 0; i < terms.length; i++) {
+      final term = terms[i];
+      final value = double.tryParse(term['value'] ?? '0') ?? 0;
+
+      // Determine the actual signed value based on the sign
+      final signedValue = term['sign'] == '-' ? -value.abs() : value.abs();
+
+      // First term doesn't have an operator
+      final operator = i == 0 ? '+' : term['operator'] ?? '+';
+
+      parsedTerms
+          .add(ParsedTerm(signedValue, operator, i, term['sign'] ?? '+'));
+    }
+
+    return parsedTerms;
+  }
+
+  List<TextSpan> _getHighlightedExpression(
+      Map<String, dynamic> step, int stepNumber) {
+    final List<TextSpan> spans = [];
+    final String expression = step['expression'] as String;
+    final String operation = step['operation'] as String;
+    final List<dynamic> values = step['values'] as List<dynamic>;
+
+    final parts = expression.split(' ');
+
+    for (int i = 0; i < parts.length; i++) {
+      // Handle negative numbers properly
+      String value1 = values[0] < 0
+          ? "(${formatNumber(values[0])})"
+          : formatNumber(values[0]);
+      String value2 = values[1] < 0
+          ? "(${formatNumber(values[1])})"
+          : formatNumber(values[1]);
+
+      // Match the expression properly with negative numbers
+      if (parts[i] == value1 &&
+          i + 2 < parts.length &&
+          (parts[i + 1] == operation) &&
+          parts[i + 2] == value2) {
+        spans.add(TextSpan(
+          text: "${parts[i]} ${parts[i + 1]} ${parts[i + 2]} ",
+          style: const TextStyle(
+              color: Colors.black), // Highlight current operation
+        ));
+        i += 2; // Skip over the next two parts
+      } else {
+        spans.add(TextSpan(
+          text: "${parts[i]} ",
+          style: const TextStyle(color: Colors.grey), // Gray out other parts
+        ));
+      }
+    }
+    return spans;
+  }
+
   String formatNumber(double? number) {
     if (number == null) return '0';
-    return number % 1 == 0
-        ? number.toInt().toString()
-        : number.toStringAsFixed(2);
+
+    // Check if the number is a whole number
+    if (number % 1 == 0) {
+      return number.toInt().toString();
+    }
+    // If it's a decimal, show 2 decimal places
+    return number.toStringAsFixed(2);
+  }
+
+  String formatExpression(List<ParsedTerm> terms) {
+    return terms.map((term) {
+      String value = formatNumber(term.value.abs());
+      // For first term, just show the sign and value
+      if (term.originalIndex == 0) {
+        return term.value < 0 ? "(-$value)" : value;
+      }
+      // For subsequent terms, show the correct operator (not the sign)
+      return "${term.operator} ${term.value < 0 ? "(-$value)" : value}";
+    }).join(' ');
   }
 
   static const List<Map<String, dynamic>> signs = [
@@ -320,107 +422,151 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
   }
 
   void computeResult() {
-    double currentResult = 0;
+    List<ParsedTerm> parsedTerms = _parseTerms();
     List<Map<String, dynamic>> steps = [];
+    double finalResult = 0;
 
-    for (int i = 0; i < terms.length; i++) {
-      final term = terms[i];
-      final value = double.tryParse(term['value'] ?? '0') ?? 0;
-      final signedValue = term['sign'] == '-' ? -value : value;
-      final signText = term['sign'] == '-' ? '-' : '';
-      // final signText = term['sign'] == '-' ? '-' : '+';
+    // Step 1: Process all multiplications first
+    List<ParsedTerm> simplifiedTerms = List.from(parsedTerms);
+    bool didMultiplication = true;
+    String currentExpression = formatExpression(simplifiedTerms);
 
-      String formatValue(String value, bool isNegative) {
-        return isNegative ? "(-$value)" : value;
+    while (didMultiplication) {
+      didMultiplication = false;
+      for (int i = 1; i < simplifiedTerms.length; i++) {
+        final currentTerm = simplifiedTerms[i];
+
+        if (currentTerm.operator == '×') {
+          final previousTerm = simplifiedTerms[i - 1];
+          double result = previousTerm.value * currentTerm.value;
+          String explanation =
+              "Following MDAS rule: Multiplication first - ${previousTerm.value} × ${currentTerm.value} = $result";
+
+          steps.add({
+            'step': currentExpression,
+            'explanation': explanation,
+            'result': result,
+            'operation': currentTerm.operator,
+            'values': [previousTerm.value, currentTerm.value],
+            'expression': currentExpression
+          });
+
+          // Replace the previous term with the result and remove the current term
+          simplifiedTerms[i - 1] = ParsedTerm(
+            result,
+            previousTerm.operator,
+            previousTerm.originalIndex,
+            result < 0 ? '-' : '+',
+          );
+          simplifiedTerms.removeAt(i);
+          // Update the current expression to reflect the new state
+          currentExpression = formatExpression(simplifiedTerms);
+          i--; // Adjust index after removal
+          didMultiplication = true; // We found and processed a multiplication
+        }
       }
+    }
 
-      if (i == 0) {
-        currentResult = signedValue;
-        // Remove parentheses from first step
-        final formattedInitialValue =
-            formatValue(term['value'], term['sign'] == '-');
-        steps.add({
-          // 'step': 'Start with ${signText}${term['value']}',
-          'step': 'Start with $formattedInitialValue',
-          'explanation': 'We begin with our first number',
-          'result': currentResult,
-          'operation': 'initial',
-          'values': [signedValue],
-        });
-      } else {
-        // final formattedValue = '(${signText}${term['value']}';
-        final formattedValue = formatValue(term['value'], term['sign'] == '-');
-        final operator = term['operator'];
-        final previousResult = currentResult;
-        String explanation = '';
+    // Step 2: Process all divisions next
+    bool didDivision = true;
 
-        switch (operator) {
-          case '+':
-            currentResult += signedValue;
-            // More detailed explanations for addition
-            if ((previousResult >= 0 && signedValue >= 0) ||
-                (previousResult < 0 && signedValue < 0)) {
-              explanation =
-                  'When adding numbers with the same sign, we add their absolute values and keep the sign';
-            } else {
-              explanation =
-                  'When adding numbers with different signs, we find the difference between their absolute values and use the sign of the larger number';
-            }
-            break;
-          case '-':
-            currentResult -= signedValue;
-            // More detailed explanations for subtraction
-            if (signedValue >= 0) {
-              explanation =
-                  'Subtracting a positive number is the same as adding its negative';
-            } else {
-              explanation =
-                  'Subtracting a negative number is the same as adding its positive value';
-            }
-            break;
-          case '×':
-            currentResult *= signedValue;
-            // More detailed explanations for multiplication
-            if ((previousResult >= 0 && signedValue >= 0) ||
-                (previousResult < 0 && signedValue < 0)) {
-              explanation =
-                  'When multiplying numbers with the same sign (both positive or both negative), the result is positive';
-            } else {
-              explanation =
-                  'When multiplying numbers with different signs (one positive, one negative), the result is negative';
-            }
-            break;
-          case '÷':
-            if (value != 0) {
-              currentResult /= signedValue;
-              // More detailed explanations for division
-              if ((previousResult >= 0 && signedValue >= 0) ||
-                  (previousResult < 0 && signedValue < 0)) {
-                explanation =
-                    'When dividing numbers with the same sign (both positive or both negative), the result is positive';
-              } else {
-                explanation =
-                    'When dividing numbers with different signs (one positive, one negative), the result is negative';
-              }
-            } else {
-              explanation =
-                  'Division by zero is undefined. The result remains unchanged.';
-            }
-            break;
+    while (didDivision) {
+      didDivision = false;
+      for (int i = 1; i < simplifiedTerms.length; i++) {
+        final currentTerm = simplifiedTerms[i];
+
+        if (currentTerm.operator == '÷') {
+          final previousTerm = simplifiedTerms[i - 1];
+          double result;
+          String explanation;
+
+          if (currentTerm.value == 0) {
+            result = previousTerm.value;
+            explanation =
+                "Division by zero is undefined. The result remains unchanged.";
+          } else {
+            result = previousTerm.value / currentTerm.value;
+            explanation =
+                "Following MDAS rule: Division next - ${previousTerm.value} ÷ ${currentTerm.value} = $result";
+          }
+
+          steps.add({
+            'step': currentExpression,
+            'explanation': explanation,
+            'result': result,
+            'operation': currentTerm.operator,
+            'values': [previousTerm.value, currentTerm.value],
+            'expression': currentExpression
+          });
+
+          // Replace the previous term with the result and remove the current term
+          simplifiedTerms[i - 1] = ParsedTerm(
+            result,
+            previousTerm.operator,
+            previousTerm.originalIndex,
+            result < 0 ? '-' : '+',
+          );
+          simplifiedTerms.removeAt(i);
+          // Update the current expression to reflect the new state
+          currentExpression = formatExpression(simplifiedTerms);
+          i--; // Adjust index after removal
+          didDivision = true; // We found and processed a division
+        }
+      }
+    }
+
+    // Step 3: Process all additions and subtractions from left to right
+    if (simplifiedTerms.isNotEmpty) {
+      finalResult = simplifiedTerms[0].value;
+
+      for (int i = 1; i < simplifiedTerms.length; i++) {
+        final term = simplifiedTerms[i];
+        final previousResult = finalResult;
+
+        // Store the current expression before modifying it
+        String stepExpression = currentExpression;
+
+        if (term.operator == '+') {
+          finalResult += term.value;
+        } else if (term.operator == '-') {
+          finalResult -= term.value;
         }
 
         steps.add({
-          'step': '${term['operator']} $formattedValue',
-          'explanation': explanation,
-          'result': currentResult,
-          'operation': operator,
-          'values': [previousResult, signedValue],
+          'step': stepExpression,
+          'explanation': term.operator == '+'
+              ? "Now we perform Addition: $previousResult + ${term.value} = $finalResult"
+              : "Now we perform Subtraction: $previousResult - ${term.value} = $finalResult",
+          'result': finalResult,
+          'operation': term.operator,
+          'values': [previousResult, term.value],
+          'expression': stepExpression
         });
+
+        // Create a new list with just the remaining terms for the next step
+        if (i < simplifiedTerms.length - 1) {
+          List<ParsedTerm> remainingTerms = [];
+          // Add the accumulated result as the first term
+          remainingTerms.add(ParsedTerm(
+            finalResult,
+            '+', // The operator doesn't matter for the first term
+            0, // Use 0 as the original index
+            finalResult < 0 ? '-' : '+',
+          ));
+
+          // Add the remaining terms
+          for (int j = i + 1; j < simplifiedTerms.length; j++) {
+            remainingTerms.add(simplifiedTerms[j]);
+          }
+
+          // Update the expression for the next step
+          currentExpression = formatExpression(remainingTerms);
+        }
       }
     }
 
     setState(() {
-      result = currentResult;
+      result = finalResult;
       computationSteps = steps;
       isComputed = true;
       score += 10;
@@ -430,7 +576,6 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
     // Start breakdown animation and scroll to it
     _breakdownController.forward(from: 0.0);
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      // Find all widgets before the breakdown section
       double offset = 0;
       for (int i = 0; i < terms.length; i++) {
         offset += 100; // Approximate height of each term
@@ -736,12 +881,17 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
                           fontSize: isSmallScreen ? 14 : 16,
                         ),
                       ),
-                      keyboardType: TextInputType.number,
+                      keyboardType: const TextInputType.numberWithOptions(
+                          decimal: true), // Numeric keyboard with decimal
                       enabled: !isComputed,
                       controller: _controllers[index],
+                      inputFormatters: [
+                        DecimalInputFormatter(),
+                      ],
                       onChanged: (value) => updateTerm(index, 'value', value),
                     ),
                   ),
+                  const SizedBox(width: 12),
                   if (terms.length > 2 && !isComputed)
                     Material(
                       color: Colors.red.withOpacity(0.1),
@@ -1042,6 +1192,20 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
                     String educationalExplanation =
                         _generateEducationalExplanation(step, stepNumber);
 
+                    // Create a properly formatted expression for display
+                    String displayExpression = '';
+                    if (step['operation'] == '×') {
+                      List<dynamic> values = step['values'];
+                      displayExpression =
+                          "${values[0]} × ${values[1]} = ${step['result']}";
+                    } else if (step['operation'] == '÷') {
+                      List<dynamic> values = step['values'];
+                      displayExpression =
+                          "${values[0]} ÷ ${values[1]} = ${step['result']}";
+                    } else {
+                      displayExpression = step['expression'] as String;
+                    }
+
                     return Container(
                       margin: const EdgeInsets.only(bottom: 12),
                       padding: const EdgeInsets.all(12),
@@ -1063,32 +1227,48 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
                           Row(
                             children: [
                               Container(
-                                padding: const EdgeInsets.all(6),
-                                decoration: BoxDecoration(
-                                  color:
-                                      const Color(0xFF6C63FF).withOpacity(0.1),
-                                  borderRadius: BorderRadius.circular(8),
-                                ),
-                                child: Text(
-                                  'Step $stepNumber',
-                                  style: const TextStyle(
-                                    color: Color(0xFF6C63FF),
-                                    fontWeight: FontWeight.bold,
-                                  ),
-                                ),
-                              ),
-                              const SizedBox(width: 8),
-                              Text(
-                                step['step'] as String,
-                                style: const TextStyle(
-                                  fontSize: 16,
-                                  fontWeight: FontWeight.bold,
+                                margin: const EdgeInsets.only(bottom: 8),
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Row(
+                                      children: [
+                                        Container(
+                                          padding: const EdgeInsets.all(6),
+                                          decoration: BoxDecoration(
+                                            color: const Color(0xFF6C63FF)
+                                                .withOpacity(0.1),
+                                            borderRadius:
+                                                BorderRadius.circular(8),
+                                          ),
+                                          child: Text(
+                                            'Step $stepNumber',
+                                            style: const TextStyle(
+                                              color: Color(0xFF6C63FF),
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                        ),
+                                        const SizedBox(width: 12),
+                                        RichText(
+                                          text: TextSpan(
+                                            children: _getHighlightedExpression(
+                                                step, stepNumber),
+                                            style: const TextStyle(
+                                              fontSize: 14,
+                                              color: Colors.grey,
+                                              fontWeight: FontWeight.bold,
+                                            ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ],
                                 ),
                               ),
                             ],
                           ),
                           const SizedBox(height: 8),
-
                           // Educational explanation
                           Padding(
                             padding: const EdgeInsets.only(left: 30),
@@ -1100,7 +1280,7 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
                             ),
                           ),
 
-                          // Rules of Signs section
+                          // Rules of Signs section - show the correct operation
                           if (_shouldShowRuleOfSigns(step))
                             Container(
                               margin: const EdgeInsets.only(top: 8, left: 30),
@@ -1118,13 +1298,69 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
                                   ),
                                   const SizedBox(width: 8),
                                   Expanded(
-                                    child: Text(
-                                      _getRuleOfSignsExplanation(step),
-                                      style: const TextStyle(
-                                        color: Color(0xFF6C63FF),
-                                        fontSize: 14,
-                                        fontWeight: FontWeight.w500,
-                                      ),
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        RichText(
+                                          text: TextSpan(
+                                            children: [
+                                              TextSpan(
+                                                text: "Rule applied: ",
+                                                style: const TextStyle(
+                                                  color: Color(0xFF6C63FF),
+                                                  fontSize: 12,
+                                                  fontWeight: FontWeight
+                                                      .bold, // Bold "Rule applied"
+                                                ),
+                                              ),
+                                              TextSpan(
+                                                text:
+                                                    "${step['operation'] == '×' ? 'Multiplication' : step['operation'] == '÷' ? 'Division' : 'Addition/Subtraction'} sign rule and MDAS",
+                                                style: const TextStyle(
+                                                  color: Color(0xFF6C63FF),
+                                                  fontSize: 12,
+                                                  fontWeight: FontWeight.w300,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                        RichText(
+                                          text: TextSpan(
+                                            children: [
+                                              TextSpan(
+                                                text: "\nMDAS Rule: ",
+                                                style: const TextStyle(
+                                                  color: Color(0xFF6C63FF),
+                                                  fontSize: 12,
+                                                  fontWeight: FontWeight
+                                                      .bold, // Bold "Following MDAS"
+                                                ),
+                                              ),
+                                              TextSpan(
+                                                text:
+                                                    "Multiplication is performed before division, addition and subtraction",
+                                                style: const TextStyle(
+                                                  color: Color(0xFF6C63FF),
+                                                  fontSize: 12,
+                                                  fontWeight: FontWeight.w300,
+                                                ),
+                                              ),
+                                            ],
+                                          ),
+                                        ),
+                                        if (step['operation'] == '×' ||
+                                            step['operation'] == '÷')
+                                          Text(
+                                            "\n${formatNumber(step['values'][0])} ${step['operation']} ${formatNumber(step['values'][1])} = ${formatNumber(step['result'])}",
+                                            style: const TextStyle(
+                                              color: Color(0xFF6C63FF),
+                                              fontSize: 14,
+                                              fontWeight: FontWeight.w500,
+                                            ),
+                                          ),
+                                      ],
                                     ),
                                   ),
                                 ],
@@ -1163,7 +1399,7 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
                             ),
 
                           // Step result
-                          if (stepNumber > 1)
+                          if (stepNumber > 0)
                             Container(
                               margin: const EdgeInsets.only(top: 12),
                               width: double.infinity,
@@ -1289,9 +1525,9 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
   // Helper method to generate more educational explanations
   String _generateEducationalExplanation(
       Map<String, dynamic> step, int stepNumber) {
-    final String stepText = step['step'] as String;
     final List<dynamic> values = step['values'] ?? [];
     final double resultValue = step['result'] ?? 0.0;
+    final String operation = step['operation']; // Use operation directly
 
     String formatNumber(dynamic number) {
       if (number is double) {
@@ -1315,44 +1551,48 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
     String val2 = formatWithParentheses(values[1]);
     String result = formatWithParentheses(resultValue);
 
-    if (stepText.contains('+')) {
-      if (values[1] >= 0) {
-        return "When we add a positive number ${val2}, we move to the right on the number line from ${val1}. This gives us ${result}.";
-      } else {
-        return "When we add a negative number ${val2}, we move to the left on the number line from ${val1}. This gives us ${result}.";
-      }
-    } else if (stepText.contains('-')) {
-      return "Subtracting ${val2} is the same as adding its opposite. So ${val1} - ${val2} is the same as ${val1} + ${formatWithParentheses(-values[1])} = ${result}.";
-    } else if (stepText.contains('×')) {
-      String explanation =
-          "When multiplying ${val1} × ${val2}, we use the sign rules: ";
-      if ((values[0] >= 0 && values[1] >= 0) ||
-          (values[0] < 0 && values[1] < 0)) {
-        explanation +=
-            "since both numbers have the same sign, the result ${result} is positive.";
-      } else {
-        explanation +=
-            "since the numbers have different signs, the result ${result} is negative.";
-      }
-      return explanation;
-    } else if (stepText.contains('÷')) {
-      if (values[1] == 0) {
-        return "Division by zero is undefined. The result remains ${val1}.";
-      }
-      String explanation =
-          "When dividing ${val1} ÷ ${val2}, we use the sign rules: ";
-      if ((values[0] >= 0 && values[1] >= 0) ||
-          (values[0] < 0 && values[1] < 0)) {
-        explanation +=
-            "since both numbers have the same sign, the result ${result} is positive.";
-      } else {
-        explanation +=
-            "since the numbers have different signs, the result ${result} is negative.";
-      }
-      return explanation;
-    }
+    // Use the operation field to generate the correct explanation
+    switch (operation) {
+      case '+':
+        return values[1] >= 0
+            ? "When we add a positive number ${val2}, we move to the right on the number line from ${val1}. This gives us ${result}."
+            : "When we add a negative number ${val2}, we move to the left on the number line from ${val1}. This gives us ${result}.";
 
-    return step['explanation'] as String;
+      case '-':
+        return "Subtracting ${val2} is the same as adding its opposite. So ${val1} - ${val2} is the same as ${val1} + ${formatWithParentheses(-values[1])} = ${result}.";
+
+      case '×':
+        String explanation =
+            "When multiplying ${val1} × ${val2}, we use the sign rules: ";
+        if ((values[0] >= 0 && values[1] >= 0) ||
+            (values[0] < 0 && values[1] < 0)) {
+          explanation +=
+              "since both numbers have the same sign, the result ${result} is positive.";
+        } else {
+          explanation +=
+              "since the numbers have different signs, the result ${result} is negative.";
+        }
+        return explanation;
+
+      case '÷':
+        if (values[1] == 0) {
+          return "Division by zero is undefined. The result remains ${val1}.";
+        }
+        String explanation =
+            "When dividing ${val1} ÷ ${val2}, we use the sign rules: ";
+        if ((values[0] >= 0 && values[1] >= 0) ||
+            (values[0] < 0 && values[1] < 0)) {
+          explanation +=
+              "since both numbers have the same sign, the result ${result} is positive.";
+        } else {
+          explanation +=
+              "since the numbers have different signs, the result ${result} is negative.";
+        }
+        return explanation;
+
+      default:
+        return step['explanation'] as String;
+    }
   }
 
   // Helper method to check if we should show the rule of signs explanation
@@ -1369,8 +1609,14 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
     final List<dynamic> values = step['values'] ?? [];
     double resultValue = step['result'] ?? 0.0;
 
-    // Format numbers to remove decimal if it's a whole number
-    String formatNumber(dynamic number) {
+    String formatWithParentheses(dynamic number) {
+      if (number == null) return '0';
+      double num = number is int ? number.toDouble() : number;
+      String formattedNum = formatNumber(num);
+      return num < 0 ? "($formattedNum)" : formattedNum;
+    }
+
+    String _formatNumber(dynamic number) {
       if (number is double) {
         return number % 1 == 0
             ? number.toInt().toString()
@@ -1379,28 +1625,26 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
       return number.toString();
     }
 
-    // Add parentheses to negative numbers
-    String formatWithParentheses(dynamic number) {
-      String formattedNum = formatNumber(number);
-      return number < 0 ? "($formattedNum)" : formattedNum;
-    }
-
     String val1 = formatWithParentheses(values[0]);
     String val2 = formatWithParentheses(values[1]);
     String result = formatWithParentheses(resultValue);
 
+    // Add MDAS rule explanation
+    String mdasRule = "\nFollowing MDAS: ";
+    String formattedVal1 = _formatNumber(val1);
+    String formattedVal2 = _formatNumber(val2);
     if (stepText.contains('×')) {
-      return "Rule applied: Multiplication sign rule\n$val1 × $val2 = $result";
+      mdasRule += "Multiplication is performed before addition and subtraction";
+      return "Rule applied: Multiplication sign rule and MDAS\n$formattedVal1 × $formattedVal2 = $result$mdasRule";
     } else if (stepText.contains('÷')) {
-      return "Rule applied: Division sign rule\n$val1 ÷ $val2 = $result";
+      mdasRule += "Division is performed before addition and subtraction";
+      return "Rule applied: Division sign rule and MDAS\n$formattedVal1 ÷ $formattedVal2 = $result$mdasRule";
     } else if (stepText.contains('-')) {
-      return "Rule applied: Subtraction as adding the opposite\n$val1 - $val2 = $result";
+      mdasRule += "Subtraction is performed after multiplication and division";
+      return "Rule applied: Subtraction as adding the opposite\n$formattedVal1 - $formattedVal2 = $result$mdasRule";
     } else if (stepText.contains('+')) {
-      if (values.any((v) => v < 0)) {
-        return "Rule applied: Addition of numbers with different signs\n$val1 + $val2 = $result";
-      } else {
-        return "Rule applied: Addition of numbers with same signs\n$val1 + $val2 = $result";
-      }
+      mdasRule += "Addition is performed after multiplication and division";
+      return "Rule applied: Addition of numbers with ${values.any((v) => v < 0) ? 'different' : 'same'} signs\n$formattedVal1 + $formattedVal2 = $result$mdasRule";
     }
 
     return "";
