@@ -1417,7 +1417,7 @@ class _MyHomePageState extends State<MyHomePage> with TickerProviderStateMixin {
                               child: Text(
                                 stepNumber == computationSteps.length
                                     ? 'Final result: ${formatNumber(step['result'])}'
-                                    : 'Result so far: ${formatNumber(step['result'])}',
+                                    : 'Result so far: ${stepNumber < computationSteps.length ? computationSteps[stepNumber]['step'] : step['expression']}',
                                 style: TextStyle(
                                   color: const Color(0xFF6C63FF),
                                   fontWeight: FontWeight.bold,
